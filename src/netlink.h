@@ -36,6 +36,7 @@
 #include <fcntl.h>
 #include <glob.h>
 #include <time.h>
+#include <errno.h>
 
 
 #include <netlink/msg.h>
@@ -45,8 +46,10 @@
 #include <libubox/uloop.h>
 
 #include "event_handler.h"
+#include "utils.h"
 
 extern struct nl_sock *listen_sock_rtnl;
+extern struct nl_sock *sock_rtnl;
 extern struct nl_cb *listen_cb;
 struct nl_sock *create_socket(int protocol, int groups);
 int init_netlink_sockets();
