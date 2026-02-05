@@ -1,36 +1,39 @@
 #include "netlink.h"
 
 
-static struct nl_msg *__system_ifinfo_msg(int af, int index, const char *ifname, uint16_t type, uint16_t flags)
+static struct nl_msg *__system_ifinfo_msg(int af, int index, const char *ifname, uint16_t type, uint16_t flags, struct ifinfomsg *ifi)
 {
 	struct nl_msg *msg;
 	struct nlattr *br_linkinfo, *br_data;
 
-	struct ifinfomsg ifi = {
-		.ifi_family = af,
-		.ifi_index = index,
-	};
+    ifi->ifi_family = af;
+    ifi->ifi_index = index;
 
 	msg = nlmsg_alloc_simple(type, flags | NLM_F_REQUEST);
 	if (!msg)
 		return NULL;
 
-	nlmsg_append(msg, &ifi, sizeof(ifi), 0);
+	nlmsg_append(msg, ifi, sizeof(struct ifinfomsg), 0);
 	if (ifname)
 		nla_put_string(msg, IFLA_IFNAME, ifname);
 
-	/* Add link is "bridge" */
-	if (!(br_linkinfo = nla_nest_start(msg, IFLA_LINKINFO)))
-		goto nla_put_failure;
+    if (ifi->ifi_flags & IFF_UP) {
+        ifi->ifi_index = if_nametoindex(ifname);
+    }
+    else if (ifi->ifi_index == 0) {
+        /* Add link is "bridge" */
+        if (!(br_linkinfo = nla_nest_start(msg, IFLA_LINKINFO)))
+            goto nla_put_failure;
 
-	nla_put_string(msg, IFLA_INFO_KIND, "bridge");
+        nla_put_string(msg, IFLA_INFO_KIND, "bridge");
 
-	/* Currently no data need to added, bypass , just dummy code */
-	if (!(br_data = nla_nest_start(msg, IFLA_INFO_DATA)))
-		goto nla_put_failure;
-	
-	nla_nest_end(msg, br_data);
-	nla_nest_end(msg, br_linkinfo);
+        /* Currently no data need to added, bypass , just dummy code */
+        if (!(br_data = nla_nest_start(msg, IFLA_INFO_DATA)))
+            goto nla_put_failure;
+        
+        nla_nest_end(msg, br_data);
+        nla_nest_end(msg, br_linkinfo);
+    }
 
 	return msg;
 
@@ -39,25 +42,119 @@ nla_put_failure:
 	return NULL;
 }
 
-static struct nl_msg *system_ifinfo_msg(const char *ifname, uint16_t type, uint16_t flags)
+static struct nl_msg *system_ifinfo_msg(const char *ifname, uint16_t type, uint16_t flags, struct ifinfomsg *ifi)
 {
-	return __system_ifinfo_msg(AF_UNSPEC, 0, ifname, type, flags);
+	return __system_ifinfo_msg(AF_UNSPEC, 0, ifname, type, flags, ifi);
 }
 
+/*
+When we created a bridge interface, the netlink message structure looks like this:
++----------------------------------+
+| struct nlmsghdr                  |
+|   nlmsg_len = total_length       |
+|   nlmsg_type = RTM_NEWLINK (16)  |
+|   nlmsg_flags = NLM_F_REQUEST |  |
+|                 NLM_F_CREATE |   |
+|                 NLM_F_EXCL       |
+|   nlmsg_seq = sequence_number    |
+|   nlmsg_pid = process_id         |
++----------------------------------+
+| struct ifinfomsg                 |
+|   ifi_family = AF_UNSPEC         |
+|   ifi_type = 0                   |
+|   ifi_index = 0                  |
+|   ifi_flags = 0                  |
+|   ifi_change = 0                 |
++----------------------------------+
+| IFLA_IFNAME (rtattr)             |
+|   rta_len = 12                   |
+|   rta_type = IFLA_IFNAME (3)     |
+|   data = "br-lan\0"              |
++----------------------------------+
+| IFLA_LINKINFO (rtattr - nested)  |
+|   rta_len = 24                   |
+|   rta_type = IFLA_LINKINFO (18)  |
+|   +----------------------------+ |
+|   | IFLA_INFO_KIND (rtattr)    | |
+|   |   rta_len = 12             | |
+|   |   rta_type = 1             | |
+|   |   data = "bridge\0"        | |
+|   +----------------------------+ |
++----------------------------------+
+This message will request the kernel to create a new link (bridge) with the specified name.
+The kernel will respond with an ACK message if the bridge is created successfully.
+If the bridge already exists, it will return an error.
+- Only requests are handled by the kernel 
+- For link create:
+    + ifi_family = AF_UNSPEC
+- For bridge ops:
+    + ifi_family = AF_BRIDGE
+- The ifi_index is 0 when creating a new bridge
+- The ifi_flags and ifi_change are set to 0
+- The IFLA_IFNAME attribute specifies the name of the bridge to be created
+- The IFLA_LINKINFO attribute contains nested attributes that specify the type of link (bridge)
+  and any additional data (none in this case)
 
+For up bridge "br-lan", the message looks like this:
++----------------------------------+
+| struct nlmsghdr (16 bytes)       |
+|   nlmsg_len = 32                 |
+|   nlmsg_type = RTM_NEWLINK (16)  |
+|   nlmsg_flags = NLM_F_REQUEST(1) |
+|   nlmsg_seq = <seq>              |
+|   nlmsg_pid = <pid>              |
++----------------------------------+
+| struct ifinfomsg (16 bytes)      |
+|   ifi_family = AF_UNSPEC (0)     |
+|   ifi_type = 0                   |
+|   ifi_index = 3 (br-lan)         |
+|   ifi_flags = IFF_UP (0x1)       |
+|   ifi_change = IFF_UP (0x1)      |
++----------------------------------+
+Total: 32 bytes (no attributes)
+
+*/
 static int bridge_modify(int cmd, unsigned int flags, int argc, char **argv)
 {
     char *br_name = NULL;
     struct nl_msg *msg;
     int ret;
-    
-    if (matches(*argv, "dev") == 0)
-        NEXT_ARG();
-    
-    br_name = *argv;
-    printf("DEBUG: Bridge name is %s\n", br_name);
 
-    msg = system_ifinfo_msg(br_name, cmd, flags);
+    struct ifinfomsg ifi = {
+        .ifi_family = 0,
+        .ifi_index = 0,
+        .ifi_change = 0,
+        .ifi_flags = 0
+	};
+
+    while (argc > 0) {
+        if (matches(*argv, "dev") == 0) {
+            NEXT_ARG();
+            br_name = *argv;
+            printf("DEBUG: Bridge name is %s\n", br_name);
+        }
+        else if (matches(*argv, "up") == 0) {
+            ifi.ifi_flags |= IFF_UP;
+            ifi.ifi_change |= IFF_UP;
+        }
+        else if (matches(*argv, "down") == 0) {
+            ifi.ifi_flags &= ~IFF_UP;
+            ifi.ifi_change |= IFF_UP;
+        }
+        else {
+            fprintf(stderr, "Unknown argument: %s\n", *argv);
+            return -EINVAL;
+        }
+        argc--; argv++;
+    }
+
+    // if (matches(*argv, "dev") == 0)
+    //     NEXT_ARG();
+    
+    // br_name = *argv;
+    // printf("DEBUG: Bridge name is %s\n", br_name);
+
+    msg = system_ifinfo_msg(br_name, cmd, flags, &ifi);
     if (!msg) {
         fprintf(stderr, "Failed to allocate netlink message\n");
         return -ENOMEM;
@@ -105,5 +202,8 @@ int do_bridge(int argc, char **argv) {
 		return bridge_modify(RTM_NEWLINK,
 				     NLM_F_CREATE|NLM_F_EXCL,
 				     argc-1, argv+1);
+    else if (matches(*argv, "set") == 0)
+        return bridge_modify(RTM_NEWLINK,
+				     0, argc-1, argv+1);
     return 0;
 }
