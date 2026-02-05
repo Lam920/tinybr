@@ -1,7 +1,7 @@
 #include "netlink.h"
 
 
-static struct nl_msg *__system_ifinfo_msg(int af, int index, const char *ifname, uint16_t type, uint16_t flags, struct ifinfomsg *ifi)
+static struct nl_msg *__system_ifinfo_msg(int af, int index, const char *ifname, const char *master_ifname, uint16_t type, uint16_t flags, struct ifinfomsg *ifi)
 {
 	struct nl_msg *msg;
 	struct nlattr *br_linkinfo, *br_data;
@@ -20,20 +20,28 @@ static struct nl_msg *__system_ifinfo_msg(int af, int index, const char *ifname,
     if (ifi->ifi_flags & IFF_UP) {
         ifi->ifi_index = if_nametoindex(ifname);
     }
-    else if (ifi->ifi_index == 0) {
+    if (ifi->ifi_index == 0) {
         /* Add link is "bridge" */
-        if (!(br_linkinfo = nla_nest_start(msg, IFLA_LINKINFO)))
-            goto nla_put_failure;
+        if (master_ifname) {
+            /* IFLA_MASTER is not a nested attribute. Put it directly as u32. */
+            if (nla_put_u32(msg, IFLA_MASTER, if_nametoindex(master_ifname)) < 0)
+                goto nla_put_failure;
+        }
+        else {
+            if (!(br_linkinfo = nla_nest_start(msg, IFLA_LINKINFO)))
+                goto nla_put_failure;
 
-        nla_put_string(msg, IFLA_INFO_KIND, "bridge");
+            nla_put_string(msg, IFLA_INFO_KIND, "bridge");
 
-        /* Currently no data need to added, bypass , just dummy code */
-        if (!(br_data = nla_nest_start(msg, IFLA_INFO_DATA)))
-            goto nla_put_failure;
-        
-        nla_nest_end(msg, br_data);
-        nla_nest_end(msg, br_linkinfo);
+            /* Currently no data need to added, bypass , just dummy code */
+            if (!(br_data = nla_nest_start(msg, IFLA_INFO_DATA)))
+                goto nla_put_failure;
+            
+            nla_nest_end(msg, br_data);
+            nla_nest_end(msg, br_linkinfo);
+        }
     }
+
 
 	return msg;
 
@@ -42,9 +50,9 @@ nla_put_failure:
 	return NULL;
 }
 
-static struct nl_msg *system_ifinfo_msg(const char *ifname, uint16_t type, uint16_t flags, struct ifinfomsg *ifi)
+static struct nl_msg *system_ifinfo_msg(const char *ifname, const char *master_ifname, uint16_t type, uint16_t flags, struct ifinfomsg *ifi)
 {
-	return __system_ifinfo_msg(AF_UNSPEC, 0, ifname, type, flags, ifi);
+	return __system_ifinfo_msg(AF_UNSPEC, 0, ifname, master_ifname, type, flags, ifi);
 }
 
 /*
@@ -113,10 +121,37 @@ For up bridge "br-lan", the message looks like this:
 +----------------------------------+
 Total: 32 bytes (no attributes)
 
+
+
+For add new port member to bridge "br-lan", the message looks like this:
++----------------------------------+
+| struct nlmsghdr (16 bytes)       |
+|   nlmsg_len = 44                 |
+|   nlmsg_type = RTM_NEWLINK (16)  |
+|   nlmsg_flags = NLM_F_REQUEST(1) |
+|   nlmsg_seq = <seq>              |
+|   nlmsg_pid = <pid>              |
++----------------------------------+
+| struct ifinfomsg (16 bytes)      |
+|   ifi_family = AF_UNSPEC (0)     |
+|   ifi_type = 0                   |
+|   ifi_index = 5 (eth1)           |
+|   ifi_flags = 0                  |
+|   ifi_change = 0                 |
++----------------------------------+
+| IFLA_MASTER attribute (8 bytes)  |
+|   rta_len = 8                    |
+|   rta_type = IFLA_MASTER (10)    |
+|   rta_data = 3 (br-wan's index)  |
++----------------------------------+
+| Padding (4 bytes)                |
++----------------------------------+
+Total: 44 bytes 
 */
 static int bridge_modify(int cmd, unsigned int flags, int argc, char **argv)
 {
-    char *br_name = NULL;
+    char *dev_name = NULL;
+    char *master_dev_name = NULL;
     struct nl_msg *msg;
     int ret;
 
@@ -127,11 +162,18 @@ static int bridge_modify(int cmd, unsigned int flags, int argc, char **argv)
         .ifi_flags = 0
 	};
 
+    // ip link set dev eth1 master br-wan
+
     while (argc > 0) {
         if (matches(*argv, "dev") == 0) {
             NEXT_ARG();
-            br_name = *argv;
-            printf("DEBUG: Bridge name is %s\n", br_name);
+            dev_name = *argv;
+            printf("DEBUG: Device name is %s\n", dev_name);
+        }
+        else if (matches(*argv, "master") == 0) {
+            NEXT_ARG();
+            master_dev_name = *argv;
+            printf("DEBUG: Master device name is %s\n", master_dev_name);
         }
         else if (matches(*argv, "up") == 0) {
             ifi.ifi_flags |= IFF_UP;
@@ -148,13 +190,7 @@ static int bridge_modify(int cmd, unsigned int flags, int argc, char **argv)
         argc--; argv++;
     }
 
-    // if (matches(*argv, "dev") == 0)
-    //     NEXT_ARG();
-    
-    // br_name = *argv;
-    // printf("DEBUG: Bridge name is %s\n", br_name);
-
-    msg = system_ifinfo_msg(br_name, cmd, flags, &ifi);
+    msg = system_ifinfo_msg(dev_name, master_dev_name, cmd, flags, &ifi);
     if (!msg) {
         fprintf(stderr, "Failed to allocate netlink message\n");
         return -ENOMEM;
@@ -178,9 +214,10 @@ static int bridge_modify(int cmd, unsigned int flags, int argc, char **argv)
         return ret;
     }
     
-    printf("Bridge %s created successfully!\n", br_name);
+    printf("Device %s created successfully!\n", dev_name);
     return 0;
 }
+
 
 int do_bridge(int argc, char **argv) {
     if (argc < 1) {
@@ -197,6 +234,8 @@ int do_bridge(int argc, char **argv) {
             return -1;
         }
     }
+
+    /* ip link set dev eth1 master br-wan */
     
     if (matches(*argv, "add") == 0)
 		return bridge_modify(RTM_NEWLINK,
