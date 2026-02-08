@@ -1,7 +1,7 @@
 #include "netlink.h"
 
 
-static struct nl_msg *__system_ifinfo_msg(int af, int index, const char *ifname, const char *master_ifname, uint16_t type, uint16_t flags, struct ifinfomsg *ifi)
+static struct nl_msg *__system_ifinfo_msg(int af, int index, const char *ifname, const char *master_ifname, uint16_t type, uint16_t flags, struct ifinfomsg *ifi, int vlan_filtering)
 {
 	struct nl_msg *msg;
 	struct nlattr *br_linkinfo, *br_data;
@@ -20,7 +20,7 @@ static struct nl_msg *__system_ifinfo_msg(int af, int index, const char *ifname,
     if (ifi->ifi_flags & IFF_UP) {
         ifi->ifi_index = if_nametoindex(ifname);
     }
-    if (ifi->ifi_index == 0) {
+    if (ifi->ifi_index == 0 || (vlan_filtering != -1)) {
         /* Add link is "bridge" */
         if (master_ifname) {
             /* IFLA_MASTER is not a nested attribute. Put it directly as u32. */
@@ -36,7 +36,7 @@ static struct nl_msg *__system_ifinfo_msg(int af, int index, const char *ifname,
             /* Currently no data need to added, bypass , just dummy code */
             if (!(br_data = nla_nest_start(msg, IFLA_INFO_DATA)))
                 goto nla_put_failure;
-            
+            nla_put_u8(msg, IFLA_BR_VLAN_FILTERING, vlan_filtering == 1 ? 1 : 0);
             nla_nest_end(msg, br_data);
             nla_nest_end(msg, br_linkinfo);
         }
@@ -50,9 +50,9 @@ nla_put_failure:
 	return NULL;
 }
 
-static struct nl_msg *system_ifinfo_msg(const char *ifname, const char *master_ifname, uint16_t type, uint16_t flags, struct ifinfomsg *ifi)
+static struct nl_msg *system_ifinfo_msg(const char *ifname, const char *master_ifname, uint16_t type, uint16_t flags, struct ifinfomsg *ifi, int vlan_filtering)
 {
-	return __system_ifinfo_msg(AF_UNSPEC, 0, ifname, master_ifname, type, flags, ifi);
+	return __system_ifinfo_msg(AF_UNSPEC, 0, ifname, master_ifname, type, flags, ifi, vlan_filtering);
 }
 
 /*
@@ -152,8 +152,10 @@ static int bridge_modify(int cmd, unsigned int flags, int argc, char **argv)
 {
     char *dev_name = NULL;
     char *master_dev_name = NULL;
+    char *type = NULL;
     struct nl_msg *msg;
     int ret;
+    int vlan_filtering = -1;
 
     struct ifinfomsg ifi = {
         .ifi_family = 0,
@@ -183,6 +185,16 @@ static int bridge_modify(int cmd, unsigned int flags, int argc, char **argv)
             ifi.ifi_flags &= ~IFF_UP;
             ifi.ifi_change |= IFF_UP;
         }
+        else if (matches(*argv, "type") == 0) {
+            NEXT_ARG();
+            type = *argv;
+            printf("DEBUG: Type is %s\n", type);
+        }
+        else if (matches(*argv, "vlan_filtering") == 0) {
+            NEXT_ARG();
+            vlan_filtering = atoi(*argv);
+            printf("DEBUG: vlan_filtering is %d\n", vlan_filtering);
+        }
         else {
             fprintf(stderr, "Unknown argument: %s\n", *argv);
             return -EINVAL;
@@ -190,7 +202,7 @@ static int bridge_modify(int cmd, unsigned int flags, int argc, char **argv)
         argc--; argv++;
     }
 
-    msg = system_ifinfo_msg(dev_name, master_dev_name, cmd, flags, &ifi);
+    msg = system_ifinfo_msg(dev_name, master_dev_name, cmd, flags, &ifi, vlan_filtering);
     if (!msg) {
         fprintf(stderr, "Failed to allocate netlink message\n");
         return -ENOMEM;
