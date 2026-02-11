@@ -256,5 +256,11 @@ int do_bridge(int argc, char **argv) {
     else if (matches(*argv, "set") == 0)
         return bridge_modify(RTM_NEWLINK,
 				     0, argc-1, argv+1);
+    else if (matches(*argv, "vlan") == 0)
+        return bridge_vlan(argc-1, argv+1);
+    else {
+        fprintf(stderr, "Unknown bridge command: %s\n", *argv);
+        return -EINVAL;
+    }
     return 0;
 }

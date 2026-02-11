@@ -13,7 +13,8 @@ static void usage(void)
         "Commands:\n"
         "  help                Show this help message\n"
         "  monitor             Start monitoring network events\n"
-        " add dev ...          Add bridge interface\n"
+        "  link add dev ...          Add bridge interface/ports\n"
+        "  bridge add dev {} vid {} {untagged|tagged} {pvid}\n"
     );
 
 }
@@ -45,7 +46,7 @@ int main(int argc, char *argv[]) {
         do_listen_multicast();
         // Add code to start tinybr service
     } 
-    else if (strcmp(argv[1], "link") == 0)
+    else if ((strcmp(argv[1], "link") == 0) || (strcmp(argv[1], "bridge") == 0))
     {
         // Add code to create bridge interface, affect to layer 2 only
         do_bridge(argc - 2, argv + 2);

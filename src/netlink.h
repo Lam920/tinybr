@@ -46,6 +46,7 @@
 #include <libubox/uloop.h>
 
 #include "event_handler.h"
+#include "bridge_vlan.h"
 #include "utils.h"
 
 extern struct nl_sock *listen_sock_rtnl;
